@@ -8,26 +8,24 @@
 #include <iostream>
 #include <random>
 #include <sstream>
+#include <atomic>
 
 // 全局时间配置
 struct TimeConfig {
-    int startHour = 8;      // 起始时间（小时）
-    int startMinute = 0;     // 起始时间（分钟）
-    int endHour = 23;        // 结束时间（小时）
-    int endMinute = 20;      // 结束时间（分钟）
-    int logoffHour = 23;     // 签退时间（小时）
-    int logoffMinute = 20;   // 签退时间（分钟）
-
-    // 是否启用自定义时间（false则使用默认8:00-23:20）
+    int startHour = 8;
+    int startMinute = 0;
+    int endHour = 23;
+    int endMinute = 20;
+    int logoffHour = 23;
+    int logoffMinute = 20;
     bool useCustomTime = false;
 };
 
 TimeConfig g_timeConfig;
 
-// 记录上次签退日期
 std::string lastLogoffDate = "";
-// 记录上次签到日期
 std::string lastLogonDate = "";
+std::atomic<bool> isLoggingOff{ false };  // 防止重复签退
 
 // 模拟按键
 void PressKey(WORD keyCode) {
@@ -35,16 +33,10 @@ void PressKey(WORD keyCode) {
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = keyCode;
 
-    // 按下
     SendInput(1, &input, sizeof(INPUT));
-
-    // 短暂延迟（模拟真实按键）
     Sleep(50);
-
-    // 释放
     input.ki.dwFlags = KEYEVENTF_KEYUP;
     SendInput(1, &input, sizeof(INPUT));
-
     Sleep(50);
 }
 
@@ -84,7 +76,14 @@ void LogOn() {
 }
 
 void LogOff() {
+    if (isLoggingOff) {
+        std::cout << "签退操作进行中，跳过..." << std::endl;
+        return;
+    }
+    
+    isLoggingOff = true;
     std::cout << "执行签退操作..." << std::endl;
+    Sleep(5000);
     OpenWebsite("http://210.43.65.206:8080/fzf/#/SignInCenter");
     Sleep(7500);
     for (int i = 0; i < 10; i++) {
@@ -97,14 +96,13 @@ void LogOff() {
     PressTab();
     PressSpace();
     std::cout << "签退完成" << std::endl;
+    isLoggingOff = false;
 }
 
-// 将时间转换为分钟数
 int TimeToMinutes(int hour, int minute) {
     return hour * 60 + minute;
 }
 
-// 获取当前日期字符串 YYYY-MM-DD
 std::string GetCurrentDate() {
     auto now = std::chrono::system_clock::now();
     auto now_t = std::chrono::system_clock::to_time_t(now);
@@ -114,38 +112,32 @@ std::string GetCurrentDate() {
     return oss.str();
 }
 
-// 检查是否在签退时间点附近（随机偏差，模拟人工）
 bool IsNearLogoffTime(const std::chrono::system_clock::time_point& now) {
     auto now_t = std::chrono::system_clock::to_time_t(now);
     auto now_tm = *std::localtime(&now_t);
-
+    
     int currentMinutes = TimeToMinutes(now_tm.tm_hour, now_tm.tm_min);
     int logoffMinutes = TimeToMinutes(g_timeConfig.logoffHour, g_timeConfig.logoffMinute);
-
-    // 在签退时间前后10分钟范围内，模拟人工操作的随机性
+    
     int diff = abs(currentMinutes - logoffMinutes);
     return diff <= 10;
 }
 
-// 检查是否在活动时段内
 bool IsActivePeriod(const std::chrono::system_clock::time_point& now) {
     auto now_t = std::chrono::system_clock::to_time_t(now);
     auto now_tm = *std::localtime(&now_t);
-
+    
     int currentMinutes = TimeToMinutes(now_tm.tm_hour, now_tm.tm_min);
     int startMinutes = TimeToMinutes(g_timeConfig.startHour, g_timeConfig.startMinute);
     int endMinutes = TimeToMinutes(g_timeConfig.endHour, g_timeConfig.endMinute);
-
+    
     if (startMinutes < endMinutes) {
         return currentMinutes >= startMinutes && currentMinutes < endMinutes;
-    }
-    else {
-     // 跨天情况
+    } else {
         return currentMinutes >= startMinutes || currentMinutes < endMinutes;
     }
 }
 
-// 输入时间配置
 void InputTimeConfig() {
     std::string input;
     std::cout << "是否使用默认时间配置（活动:8:00-23:20 签退:23:20）？(y/n): ";
@@ -159,14 +151,12 @@ void InputTimeConfig() {
 
         std::cout << "请输入活动结束时间（格式：时 分，例如：23 20 或 16 10）: ";
         std::cin >> g_timeConfig.endHour >> g_timeConfig.endMinute;
-
+        
         std::cout << "请输入每日签退时间（格式：时 分，例如：23 20）: ";
         std::cin >> g_timeConfig.logoffHour >> g_timeConfig.logoffMinute;
 
-        // 清空输入缓冲区
         std::cin.ignore();
 
-        // 验证输入
         g_timeConfig.startHour = std::max(0, std::min(23, g_timeConfig.startHour));
         g_timeConfig.startMinute = std::max(0, std::min(59, g_timeConfig.startMinute));
         g_timeConfig.endHour = std::max(0, std::min(23, g_timeConfig.endHour));
@@ -200,7 +190,6 @@ int getRandomNumber(int min, int max) {
     return dist(gen);
 }
 
-// 显示当前配置信息
 void ShowConfig() {
     std::cout << "\n========== 当前配置 ==========" << std::endl;
     if (g_timeConfig.useCustomTime) {
@@ -225,18 +214,34 @@ void ShowConfig() {
     std::cout << "==============================\n" << std::endl;
 }
 
+// 可靠等待函数
+void ReliableSleep(int seconds) {
+    auto start = std::chrono::steady_clock::now();
+    int elapsed = 0;
+    
+    while (elapsed < seconds) {
+        int remaining = seconds - elapsed;
+        int sleepMs = (remaining > 10) ? 10000 : remaining * 1000;  // 最多等10秒
+        
+        Sleep(sleepMs);
+        
+        auto now = std::chrono::steady_clock::now();
+        elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+    }
+}
+
 int main() {
     std::cout << "自动化签到签退程序" << std::endl;
     std::cout << "==================" << std::endl;
 
-    // 输入时间配置
     InputTimeConfig();
-
-    // 显示配置
     ShowConfig();
 
     std::cout << "程序启动，按 Ctrl+C 退出..." << std::endl;
     std::cout << "========================================" << std::endl;
+
+    bool hasLoggedOnToday = false;
+    std::string lastCheckDate = "";
 
     while (true) {
         auto now = std::chrono::system_clock::now();
@@ -246,19 +251,32 @@ int main() {
 
         std::string currentDate = GetCurrentDate();
         bool isActive = IsActivePeriod(now);
+        
+        // 跨天重置签到标记
+        if (lastCheckDate != currentDate) {
+            hasLoggedOnToday = false;
+            lastCheckDate = currentDate;
+        }
 
-        // 检查1：是否在签退时间点附近（优先执行签退）
-        if (IsNearLogoffTime(now) && lastLogoffDate != currentDate) {
+        // 检查签退（优先）
+        if (IsNearLogoffTime(now) && lastLogoffDate != currentDate && !isLoggingOff) {
             std::cout << "接近每日签退时间点，执行签退操作" << std::endl;
             LogOff();
             lastLogoffDate = currentDate;
+            
+            // 签退后等待一段时间，避免立即再次检查
+            std::cout << "签退完成，等待 5 分钟后继续..." << std::endl;
+            ReliableSleep(300);  // 等待5分钟
+            continue;  // 跳过本次循环剩余部分，重新开始
         }
-        // 检查2：是否在活动时段内
-        else if (isActive) {
+        
+        // 检查签到
+        if (isActive) {
             std::cout << "当前在活动时段" << std::endl;
-            if (lastLogonDate != currentDate) {
+            if (!hasLoggedOnToday && lastLogonDate != currentDate) {
                 LogOn();
                 lastLogonDate = currentDate;
+                hasLoggedOnToday = true;
             }
             else {
                 std::cout << "已完成今日签到，无需重复操作" << std::endl;
@@ -268,10 +286,9 @@ int main() {
             std::cout << "当前在非活动时段，等待签退时间点..." << std::endl;
         }
 
-        // 随机等待时间范围：30-300秒，更接近人工操作间隔
         int sleepT = getRandomNumber(30, 300);
         std::cout << "暂停 " << sleepT << " 秒后继续检查..." << std::endl;
-        Sleep(sleepT * 1000);
+        ReliableSleep(sleepT);
     }
 
     return 0;
